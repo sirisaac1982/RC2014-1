@@ -30,42 +30,18 @@
 
 ;==============================================================================
 ;
-; DEFINES SECTION
-;
-
-RAM_56_START    .EQU    $2000   ; Bottom of 56k RAM
-RAM_48_START    .EQU    $4000   ; Bottom of 48k RAM
-RAM_32_START    .EQU    $8000   ; Bottom of 32k RAM
-
-RAMSTART        .EQU    RAM_32_START
-
-; Top of BASIC line input buffer (CURPOS WRKSPC+0ABH)
-; so it is "free ram" when BASIC resets
-; set BASIC Work space WRKSPC $8000, in RAM
-
-WRKSPC          .EQU     RAMSTART+$0220 ; set BASIC Work space WRKSPC
-                                        ; beyond the end of ACIA stuff
-
-TEMPSTACK       .EQU     WRKSPC+$0AB    ; Top of BASIC line input buffer
-                                        ; (CURPOS = WRKSPC+0ABH)
-                                        ; so it is "free ram" when BASIC resets
-
-;==============================================================================
-;
 ; INCLUDES SECTION
 ;
 
-#include    "d:/rc2014.h"
-#include    "d:/z80intr.asm"
+INCLUDE "rc2014.h"
 
-;==================================================================================
+;==============================================================================
 ;
 ; CODE SECTION
 ;
-
-        .ORG    0100H
-
+SECTION z80_acia_interrupt
 ;------------------------------------------------------------------------------
+
 serialInt:
         push af
         push hl
@@ -78,7 +54,7 @@ serialInt:
         ld l, a                     ; Move Rx byte to l
 
         ld a, (serRxBufUsed)        ; Get the number of bytes in the Rx buffer
-        cp SER_RX_BUFSIZE           ; check whether there is space in the buffer
+        cp SER_RX_BUFSIZE-1         ; check whether there is space in the buffer
         jr nc, im1_tx_check         ; buffer full, check if we can send something
 
         ld a, l                     ; get Rx byte from l
@@ -104,13 +80,10 @@ im1_tx_check:                       ; now start doing the Tx stuff
         ld a, (hl)                  ; get the Tx byte
         out (SER_DATA_ADDR), a      ; output the Tx byte to the ACIA
 
-        inc hl                      ; move the Tx pointer along
-        ld a, l                     ; get the low byte of the Tx pointer
-        cp (serTxBuf + SER_TX_BUFSIZE) & $FF
-        jr nz, im1_tx_no_wrap
-        ld hl, serTxBuf             ; we wrapped, so go back to start of buffer
-
-im1_tx_no_wrap:
+        inc l                       ; move the Tx pointer, just low byte, along
+        ld a, SER_TX_BUFSIZE-1      ; load the buffer size, (n^2)-1
+        and l                       ; range check
+        ld l, a                     ; return the low byte to l
         ld (serTxOutPtr), hl        ; write where the next byte should be popped
 
         ld hl, serTxBufUsed
@@ -126,7 +99,7 @@ im1_tei_clear:
         out (SER_CTRL_ADDR), a      ; Set the ACIA CTRL register
 
 im1_rts_check:
-        ld a, (serRxBufUsed)        ; get the current Rx count    	
+        ld a, (serRxBufUsed)        ; get the current Rx count
         cp SER_RX_FULLSIZE          ; compare the count with the preferred full size
         jr c, im1_txa_end           ; leave the RTS low, and end
 
@@ -144,6 +117,14 @@ im1_txa_end:
         reti
 
 ;------------------------------------------------------------------------------
+SECTION z80_acia_rxa_chk            ; ORG $00F0
+RXA_CHK:
+        ld a, (serRxBufUsed)
+        cp $0
+        ret
+
+;------------------------------------------------------------------------------
+SECTION z80_acia_rxa                ; ORG $0100
 RXA:
         ld a, (serRxBufUsed)        ; get the number of bytes in the Rx buffer
         or a                        ; see if there are zero bytes available
@@ -179,9 +160,10 @@ rxa_clean_up:
         ret                         ; char ready in A
 
 ;------------------------------------------------------------------------------
+SECTION z80_acia_txa                ; ORG $0130
 TXA:
-        push hl                     ; store HL so we don't clobber it        
-        ld l, a                     ; store Tx character 
+        push hl                     ; store HL so we don't clobber it
+        ld l, a                     ; store Tx character
 
         ld a, (serTxBufUsed)        ; Get the number of bytes in the Tx buffer
         or a                        ; check whether the buffer is empty
@@ -199,20 +181,17 @@ TXA:
 
 txa_buffer_out:
         ld a, (serTxBufUsed)        ; Get the number of bytes in the Tx buffer
-        cp SER_TX_BUFSIZE           ; check whether there is space in the buffer
+        cp SER_TX_BUFSIZE-1         ; check whether there is space in the buffer
         jr nc, txa_buffer_out       ; buffer full, so wait till it has space
 
-        ld a, l                     ; Retrieve Tx character     
+        ld a, l                     ; Retrieve Tx character
         ld hl, (serTxInPtr)         ; get the pointer to where we poke
         ld (hl), a                  ; write the Tx byte to the serTxInPtr
 
-        inc hl                      ; move the Tx pointer along
-        ld a, l                     ; get low byte of the Tx pointer
-        cp (serTxBuf + SER_TX_BUFSIZE) & $FF    ; check whether we've wrapped
-        jr nz, txa_no_wrap
-        ld hl, serTxBuf             ; we wrapped, so go back to start of buffer
-
-txa_no_wrap:
+        inc l                       ; move the Tx pointer, just low byte along
+        ld a, SER_TX_BUFSIZE-1      ; load the buffer size, (n^2)-1
+        and l                       ; range check
+        ld l, a                     ; return the low byte to l
         ld (serTxInPtr), hl         ; write where the next byte should be poked
 
         ld hl, serTxBufUsed
@@ -234,21 +213,17 @@ txa_no_wrap:
         ret
 
 ;------------------------------------------------------------------------------
-RXA_CHK:
-        LD        A,(serRxBufUsed)
-        CP        $0
-        RET
-
-;------------------------------------------------------------------------------
+SECTION z80_acia_print              ; ORG $0180
 PRINT:
-        LD        A,(HL)          ; Get character
-        OR        A               ; Is it $00 ?
-        RET       Z               ; Then RETurn on terminator
-        CALL      TXA             ; Print it
-        INC       HL              ; Next Character
-        JR        PRINT           ; Continue until $00
+        LD        A,(HL)            ; Get character
+        OR        A                 ; Is it $00 ?
+        RET       Z                 ; Then RETurn on terminator
+        CALL      TXA               ; Print it
+        INC       HL                ; Next Character
+        JR        PRINT             ; Continue until $00
 
 ;------------------------------------------------------------------------------
+SECTION     z80_hexloadr            ; ORG $0190
 HEX_START:
             ld hl, initString
             call PRINT
@@ -269,8 +244,8 @@ HEX_WAIT_COLON:
             cp 00           ; check if record type is 00 (data)
             jr nz, HEX_INVAL_TYPE ; if not, error
 HEX_READ_DATA:
-            ld a, '*'       ; "*" per byte loaded  # DEBUG
-            call TXA        ; Print it             # DEBUG
+;            ld a, '*'       ; "*" per byte loaded  # DEBUG
+;            call TXA        ; Print it             # DEBUG
             call HEX_READ_BYTE
             ld (de), a      ; write the byte at the RAM address
             inc de
@@ -282,10 +257,10 @@ HEX_READ_CHKSUM:
             jr nz, HEX_BAD_CHK  ; non zero, we have an issue
             ld a, '#'       ; "#" per line loaded
             call TXA        ; Print it
-            ld a, CR        ; CR                   # DEBUG
-            call TXA        ; Print it             # DEBUG
-            ld a, LF        ; LF                   # DEBUG
-            call TXA        ; Print it             # DEBUG
+;            ld a, CR        ; CR                   # DEBUG
+;            call TXA        ; Print it             # DEBUG
+;            ld a, LF        ; LF                   # DEBUG
+;            call TXA        ; Print it             # DEBUG
             jr HEX_WAIT_COLON
 
 HEX_END_LOAD:
@@ -333,8 +308,11 @@ HEX_READ_END:
             pop bc
             ret             ; return the byte read in a
 
-
 ;------------------------------------------------------------------------------
+SECTION        z80_init                  ; ORG $0240
+
+PUBLIC         INIT
+
 INIT:
                LD        SP,TEMPSTACK    ; Set up a temporary stack
 
@@ -351,7 +329,7 @@ INIT:
                LD        (serTxInPtr),HL
                LD        (serTxOutPtr),HL              
 
-               XOR       A               ; 0 the accumulator
+               XOR       A               ; 0 the RXA & TXA Buffer Counts
                LD        (serRxBufUsed),A
                LD        (serTxBufUsed),A
 
@@ -369,6 +347,7 @@ INIT:
 
                IM        1               ; interrupt mode 1
                EI
+
 START:
                LD        HL, SIGNON1     ; Sign-on message
                CALL      PRINT           ; Output string
@@ -408,39 +387,44 @@ WARMSTART:
 ;
 ; STRINGS
 ;
-SIGNON1:        .BYTE   "SBC - Grant Searle",CR,LF
-                .BYTE   "ACIA - feilipu",CR,LF,0
+SECTION         z80_init_strings         ; ORG $02D0
 
-SIGNON2:        .BYTE   CR,LF
-                .BYTE   "Cold or Warm start, "
-                .BYTE   "or HexLoadr (C|W|H) ? ",0
+SIGNON1:        DEFM    CR,LF
+                DEFM    "SBC - Grant Searle",CR,LF
+                DEFM    "ACIA - feilipu",CR,LF
+                DEFM    "z88dk",CR,LF,0
 
-initString:     .BYTE   CR,LF
-                .BYTE   "HexLoadr: "
-                .BYTE   CR,LF,0
+SIGNON2:        DEFM    CR,LF
+                DEFM    "Cold or Warm start, "
+                DEFM    "or HexLoadr (C|W|H) ? ",0
 
-invalidTypeStr: .BYTE   "Inval Type",CR,LF,0
-badCheckSumStr: .BYTE   "Chksum Error",CR,LF,0
-LoadOKStr:      .BYTE   "Done",CR,LF,0
+initString:     DEFM    CR,LF,"HexLoadr: "
+                DEFM    CR,LF,0
+
+invalidTypeStr: DEFM    CR,LF,"Invalid Type",CR,LF,0
+badCheckSumStr: DEFM    CR,LF,"Checksum Error",CR,LF,0
+LoadOKStr:      DEFM    CR,LF,"Done",CR,LF,0
 
 ;==============================================================================
 ;
 ; Z80 INTERRUPT VECTOR PROTOTYPE ASSIGNMENTS
 ;
 
-RST_08      .EQU    TXA             ; TX a character over ACIA
-RST_10      .EQU    RXA             ; RX a character over ACIA, loop byte available
-RST_18      .EQU    RXA_CHK         ; Check ACIA status, return # bytes available
-RST_20      .EQU    NULL_RET        ; RET
-RST_28      .EQU    NULL_RET        ; RET
-RST_30      .EQU    NULL_RET        ; RET
-INT_INT0    .EQU    serialInt       ; ACIA interrupt
-INT_NMI     .EQU    NULL_NMI        ; RETN
+EXTERN  NULL_RET, NULL_INT, NULL_NMI
+
+PUBLIC  Z180_TRAP
+PUBLIC  RST_08, RST_10, RST_18, RST_20, RST_28, RST_30
+PUBLIC  INT_INT0, INT_NMI
+
+DEFC    Z180_TRAP   =       INIT            ; Initialise, should never get here
+DEFC    RST_08      =       TXA             ; TX a character over ACIA
+DEFC    RST_10      =       RXA             ; RX a character over ACIA, loop byte available
+DEFC    RST_18      =       RXA_CHK         ; Check ACIA status, return # bytes available
+DEFC    RST_20      =       NULL_RET        ; RET
+DEFC    RST_28      =       NULL_RET        ; RET
+DEFC    RST_30      =       NULL_RET        ; RET
+DEFC    INT_INT0    =       serialInt       ; ACIA interrupt
+DEFC    INT_NMI     =       NULL_NMI        ; RETN
 
 ;==============================================================================
-;
-            .END
-;
-;==============================================================================
-
 
